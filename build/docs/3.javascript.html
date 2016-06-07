@@ -1,0 +1,309 @@
+<div>
+<h1 id="javascript">Javascript</h1>
+<h2 id="patch-names">Patch names</h2>
+<p>In order to distinguish different patches within a system the Heavy compiler can be passed a patch name. Code generated from the online compiler will be named after the patch project.</p>
+<p>For example, given a patch name <code>gunshot</code> the generated header file will be called <code>Heavy_gunshot.h</code> and patch specific API methods will begin with <code>hv_gunshot</code>.</p>
+<h2 id="basic-set-up">Basic set-up</h2>
+<p>Initialising a Heavy context simply requires passing through the expected sampling rate of the data to process.</p>
+<p>Audio channel information can also be retrieved via the common Heavy API methods.</p>
+<pre><code>#include &quot;Heavy_heavy.h&quot;
+
+int main(int argc, const char *argv[]) {
+  double sampleRate = 44100.0;
+
+  Hv_heavy *context = hv_heavy_new(sampleRate);
+
+  int numInputChannels = hv_getNumInputChannels(context);
+  int numOutputChannels = hv_getNumOutputChannels(context);
+
+  // do something
+
+  hv_heavy_free(context);
+  return 0;
+}
+</code></pre><h2 id="processing-the-heavy-context">Processing the Heavy context</h2>
+<p>The Heavy API allows you to process input/output audio buffers either as an array of arrays, or as contiguous arrays. Choose the correct method based on the format of your data.</p>
+<p>The input and output buffers should not refer to the same data/reference. It&#39;s possible to pass through a respective NULL value if the number of input or output channels are set to 0.</p>
+<p>The last parameter is the block size of the in/out sample data. This should ideally be a multiple of 8, but can be as low as one sample if the code is to make use of no SIMD optimisations (i.e. AVX, SSE or NEON). To force this when compiling the code pass through a HV_SIMD_NONE flag.</p>
+<h3 id="hv_heavy_process-">hv_heavy_process()</h3>
+<p>Expected buffer format is as an array of float sample arrays:</p>
+<p><img src="img/docs_c_process.svg" alt="process"></p>
+<pre><code>#include &quot;Heavy_heavy.h&quot;
+
+int main(int argc, const char *argv[]) {
+  double sampleRate = 44100.0;
+
+  Hv_heavy *context = hv_heavy_new(sampleRate);
+
+  int numIterations = 100;
+  int numOutputChannels = hv_getNumOutputChannels(context);
+  int blockSize = 256; // should be a multiple of 8
+
+  float **outBuffers = (float **) hv_malloc(numOutputChannels * sizeof(float *));
+  for (int i = 0; i &lt; numOutputChannels; ++i) {
+    outBuffers[i] = (float *) hv_malloc(blockSize * sizeof(float));
+  }
+
+  // main processing loop
+  for (int i = 0; i &lt; numIterations; ++i) {
+    hv_heavy_process(context, NULL, outBuffers, blockSize);
+    // do something with output here
+  }
+
+  hv_heavy_free(context);
+  return 0;
+}
+</code></pre><h3 id="hv_heavy_process_inline-">hv_heavy_process_inline()</h3>
+<p>Expected buffer format is as contiguous uninterleaved float sample arrays:
+<img src="img/docs_c_process_inline.svg" alt="process_inline"></p>
+<pre><code>#include &quot;Heavy_heavy.h&quot;
+
+int main(int argc, const char *argv[]) {
+  double sampleRate = 44100.0;
+
+  Hv_heavy *context = hv_heavy_new(sampleRate);
+
+  int numOutputChannels = hv_getNumOutputChannels(context);
+  int numIterations = 100;
+  int blockSize = 256; // ideally a multiple of 8
+
+  float *outBuffers = (float *) hv_malloc(numOutputChannels * blockSize * sizeof(float));
+  for (int i = 0; i &lt; numIterations; ++i) {
+    hv_heavy_process_inline(context, NULL, outBuffers, blockSize);
+    // do something with output here
+  }
+
+  hv_heavy_free(context);
+  return 0;
+}
+</code></pre><h2 id="adding-print-hooks">Adding Print Hooks</h2>
+<p>Add a print hook to receive any messages sent to [print] objects within the context.</p>
+<p><img src="img/docs_c_printhook_pd.png" alt="process_inline"></p>
+<pre><code>#include &lt;stdio.h&gt;
+#include &quot;Heavy_heavy.h&quot;
+
+void printHook(double timestampMs, const char *printLabel, const char *msgString, void *userData) {
+  printf(&quot;[@ %.3fms] %s: %s\n&quot;, timestampMs, printLabel, msgString);
+}
+
+int main(int argc, const char *argv[]) {
+  Hv_heavy *context = hv_heavy_new(0, 0, 44100.0);
+
+  // set print hook
+  hv_setPrintHook(context, &amp;printHook);
+  hv_heavy_process_inline(context, NULL, NULL, 64);
+
+  hv_heavy_free(context);
+  return 0;
+}
+</code></pre><h2 id="adding-send-hooks">Adding Send Hooks</h2>
+<p>A send hook is a C function which receives all messages sent internally within the patch. The user may then filter these messages based on the intended receiver name. This is the way in which control messages can be sent out of the patch.</p>
+<pre><code>// define the send hook as a function with the following signature
+static void sendHook(
+    double timestampMs, // in milliseconds
+    const char *receiverName,
+    const HvMessage *const m,
+    void *userData) {
+
+  // only react to messages sent to receivers named &quot;hello&quot;
+  if (!strcmp(receiverName, &quot;hello&quot;)) {
+    // do something with the message
+    printf(&quot;&gt; [%0.3fms] received message from receiver \&quot;%s\&quot;.&quot;, timestampMs, receiverName);
+  }
+}
+
+// register the send hook with the heavy instance (in this case, hv)
+hv_setSendHook(hv, sendHook);
+</code></pre><h2 id="sending-messages-to-a-context">Sending messages to a context</h2>
+<p>It is possible to send messages to a Heavy context, receiver names in the original Pd patch can be accessed via hv_scheduleMessageForReceiver. Be sure to check that the names are the same.</p>
+<p>The following code shows two options when sending a message such as test-value 0.5 to <code>[r #param-one]</code>.</p>
+<pre><code>#include &quot;Heavy_heavy.h&quot;
+
+int main(int argc, const char *argv[]) {
+  Hv_heavy *context = hv_heavy_new(44100.0);
+
+  // option 1
+  // messages can be scheduled inline where &quot;sf&quot; is the message format (symbol float)
+  hv_vscheduleMessageForReceiver(context, &quot;#param-one&quot;, delayMs, &quot;sf&quot;, &quot;test-value&quot;, 0.5f);
+
+  // option 2
+  // alternatively you can initialise a custom message object and process it separately
+  int numElements = 2;
+  HvMessage *msg = (HvMessage *) hv_alloca(hv_msg_getByteSize(numElements));
+  hv_msg_init(msg, numElements, 0.0);
+  hv_msg_setSymbol(msg, 0, &quot;test-value&quot;);
+  hv_msg_setFloat(msg, 1, 0.5f);
+  // send the message to receiver &#39;#param-one&#39; to be processed straight away
+  double delayMs = 0.0;
+  hv_scheduleMessageForReceiver(context, &quot;#param-one&quot;, delayMs, msg);
+
+  // the context must be processed for the message to take effect
+  hv_heavy_process_inline(context, NULL, NULL, 64);
+  hv_heavy_free(context);
+  return 0;
+}
+</code></pre><p>Heavy API
+The Heavy C API is typically defined in Heavy_heavy.h. It is comprised of four major interfaces including patch object management, common property queries, message management, and table management. The patch interface allows instances of the patch to be created, processed, and destroyed. The common interface allows properties such as block size or sample rate to be queried, and others to be set, including callback functions or user data. The message API allows discrete control messages to be created and manipulated as they enter and exit the patch. Finally the table interface allows the contents of tables to be managed.</p>
+<p>Patch
+This interface allows new patch instances to be created, processed, and destroyed.</p>
+<p>/** Creates a new patch instance.</p>
+<ul>
+<li>Sample rate should be positive and in Hertz.
+<em>/
+Hv_heavy </em>hv_heavy_new(double sampleRate);</li>
+</ul>
+<p>/<em>* Frees a patch instance. </em>/
+void hv_heavy_free(Hv_heavy *c);</p>
+<p>/**</p>
+<ul>
+<li>Processes one block of samples for a patch instance.</li>
+<li>The buffer format is an array of arrays.
+<em>/
+int hv_heavy_process(Hv_heavy </em>c,<pre><code>              float **const inputBuffers,
+              float **const outputBuffers,
+              int n4);
+</code></pre></li>
+</ul>
+<p>/**</p>
+<ul>
+<li>Processes one block of samples for a patch instance.</li>
+<li>The buffer format is an uninterleaved array of channels.
+<em>/
+int hv_heavy_process_inline(Hv_heavy </em>c,<pre><code>                     float *const inputBuffers,
+                     float *const outputBuffers,
+                     int n4);
+</code></pre></li>
+</ul>
+<p>Common
+The common patch API allows basic patch parameters to be queried. This includes properties such as the configured block size or sample rate. Various callbacks can be installed, such as print and send hooks, or arbitrary user data and the base asset path.</p>
+<p>/<em>* Returns the sample rate with which this patch has been configured. </em>/
+double hv_getSampleRate(Heavy *c);</p>
+<p>/<em>* Returns the number of input channels with which this patch has been configured. </em>/
+int hv_getNumInputChannels(Heavy *c);</p>
+<p>/<em>* Returns the number of output channels with which this patch has been configured. </em>/
+int hv_getNumOutputChannels(Heavy *c);</p>
+<p>/<em>* Set the print hook. The function is called whenever a message is sent to a print object. </em>/
+void hv_setPrintHook(Heavy <em>c,
+    void (</em>f)(double timestampMs, const char <em>printName, const char </em>message, void *userData));</p>
+<p>/**</p>
+<ul>
+<li>Set the send hook. The function is called whenever a message is sent to any send object.</li>
+<li>Messages returned by this function should NEVER be freed. If the message must persist, call</li>
+<li>hv_msg_copy() first.
+<em>/
+void hv_setSendHook(Heavy </em>c, void (<em>f)(const char </em>receiverName,<pre><code>                                 HvMessage *m,
+                                 void *userData));
+</code></pre></li>
+</ul>
+<p>void hv_vscheduleMessageForReceiver(Heavy <em>c,
+                                    const char </em>receiverName,
+                                    double delayMs,
+                                    const char *format, ...);</p>
+<p>void hv_scheduleMessageForReceiver(Heavy <em>c,
+                                   const char </em>receiverName,
+                                   double delayMs,
+                                   HvMessage *m);</p>
+<p>/<em>* Cancels a previously scheduled message. </em>/
+void hv_cancelMessage(Heavy <em>c, HvMessage </em>m);</p>
+<p>/<em>* Returns a table object given its name. NULL if no table with that name exists. </em>/
+HvTable <em>hv_getTableForName(Heavy </em>c, const char *tableName);</p>
+<p>/<em>* Returns the current patch time in milliseconds. </em>/
+double hv_getCurrentTime(Heavy *c);</p>
+<p>/<em>* Sets a user-definable value. This value is never manipulated by Heavy. </em>/
+void hv_setUserData(Heavy <em>c, void </em>userData);</p>
+<p>/<em>* Returns the user-defined data. </em>/
+void <em>hv_getUserData(Heavy </em>c);</p>
+<p>/<em>* Define the base path of the patch. Used as the root path to locate assets. </em>/
+void hv_setBasePath(Heavy <em>c, const char </em>basePath);</p>
+<p>Messages
+Messages are a list of one or more mixed typed elements, occuring at a specific moment during patch execution. A message element may be either a bang, float, or symbol. Message timestamps are measured in milliseconds. Message formats are often written as strings, such as &quot;fff&quot; for a message with three floats, or &quot;ssf&quot; for a message with two symbols and one float element. A canonical bang is simply &quot;b&quot;. Messages usually only exist on the stack. If they must persist, they must first be copied on to the heap via hv_msg_copy() and released with hv_msg_free().</p>
+<p>/<em>* Returns the byte size of a HvMessage with a number of elements on the heap. </em>/
+hv_size_t hv_msg_getByteSize(int numElements);</p>
+<p>/**</p>
+<ul>
+<li>Create a HvMessage on the stack with a number of elements.</li>
+<li>This message does MUST NOT be freed.
+<em>/
+HvMessage </em>hv_msg_onStack(hv_uint32_t numElements);</li>
+</ul>
+<p>/<em>* Initialise a message with the number of elements and a timestamp (in milliseconds). </em>/
+void hv_msg_init(HvMessage *m, int numElements, double timestamp);</p>
+<p>/<em>* Returns the number of elements in this message. </em>/
+int hv_msg_getNumElements(HvMessage *m);</p>
+<p>/<em>* Returns the time at which this message exists (in milliseconds). </em>/
+hv_uint32_t hv_msg_getTimestamp(HvMessage *m);</p>
+<p>/<em>* Set the time at which this message should be executed (in milliseconds). </em>/
+void hv_msg_setTimestamp(HvMessage *m, double timestamp);</p>
+<p>/**</p>
+<ul>
+<li>Returns true of the indexed element is a bang. False otherwise.</li>
+<li>Index is not bounds checked.
+<em>/
+bool hv_msg_isBang(HvMessage </em>m, int i);</li>
+</ul>
+<p>/<em>* Sets the indexed element to a bang. Index is not bounds checked. </em>/
+void hv_msg_setBang(HvMessage *m, int i);</p>
+<p>/**</p>
+<ul>
+<li>Returns true of the indexed element is a float. False otherwise.</li>
+<li>Index is not bounds checked.
+<em>/
+bool hv_msg_isFloat(HvMessage </em>m, int i);</li>
+</ul>
+<p>/<em>* Returns the indexed element as a float value. Index is not bounds checked. </em>/
+float hv_msg_getFloat(HvMessage *m, int i);</p>
+<p>/<em>* Sets the indexed element to float value. Index is not bounds checked. </em>/
+void hv_msg_setFloat(HvMessage *m, int i, float f);</p>
+<p>/**</p>
+<ul>
+<li>Returns true of the indexed element is a symbol. False otherwise.</li>
+<li>Index is not bounds checked.
+<em>/
+bool hv_msg_isSymbol(HvMessage </em>m, int i);</li>
+</ul>
+<p>/<em>* Returns the indexed element as a symbol value. Index is not bounds checked. </em>/
+char <em>hv_msg_getSymbol(HvMessage </em>m, int i);</p>
+<p>/<em>* Sets the indexed element to symbol value. Index is not bounds checked. </em>/
+void hv_msg_setSymbol(HvMessage <em>m, int i, const char </em>s);</p>
+<p>/**</p>
+<ul>
+<li>Returns true if the message has the given format,</li>
+<li>in number of elements and type. False otherwise.</li>
+<li>Valid element types are:</li>
+<li>&#39;b&#39;: bang</li>
+<li>&#39;f&#39;: float</li>
+<li>&#39;s&#39;: symbol
+*</li>
+<li>For example, a message with three floats would have a format of &quot;fff&quot;.</li>
+<li>A single bang is &quot;b&quot;. A message with two symbols is &quot;ss&quot;.</li>
+<li>These types can be mixed and matched in any way.
+<em>/
+bool hv_msg_hasFormat(HvMessage </em>m, const char *fmt);</li>
+</ul>
+<p>/**</p>
+<ul>
+<li>Returns a basic string representation of the message.</li>
+<li>The character array MUST be deallocated by the caller.
+<em>/
+char </em>hv_msg_toString(HvMessage *msg);</li>
+</ul>
+<p>/<em>* Copy a message onto the stack. The message persists. </em>/
+HvMessage <em>hv_msg_copy(HvMessage </em>m);</p>
+<p>/<em>* Free a copied message. </em>/
+void hv_msg_free(HvMessage *m);</p>
+<p>Tables
+Any named [table] object can be retrieved from the patch at runtime. The current size of the table can be queried, or it can be resized. The backing float buffer can also be referenced, allowing arbitrary data to be read or written.</p>
+<p>NOTE: These operations are in no way synchronised with the audio loop, and care must be taken to avoid any concurrency issues.
+/**</p>
+<ul>
+<li>Resizes the table to a given number of samples.</li>
+<li>Existing contents are copied to the new table. Remaining space is cleared.
+<em>/
+void hv_table_resize(HvTable </em>o, hv_uint32_t newLength);</li>
+</ul>
+<p>/<em>* Returns a pointer to the raw buffer backing this table. DO NOT free it. </em>/
+float <em>hv_table_getBuffer(HvTable </em>o);</p>
+<p>/<em>* Returns the length of this table in samples. </em>/
+int hv_table_getLength(HvTable *o);</p>
+
+</div>
